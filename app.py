@@ -128,6 +128,41 @@ button[data-baseweb="tab"] {color:#cbd5e1 !important; font-weight:600;}
 button[data-baseweb="tab"][aria-selected="true"] {color:#fff !important;}
 [data-baseweb="tab-highlight"] {background:#ec4899 !important;}
 [data-testid="stMetricValue"] {color:#fff;}
+/* Εμφάνιση v2 */
+.section {border-left:4px solid #ec4899; padding-left:10px;}
+.card {transition: transform .15s ease, box-shadow .15s ease; border:1px solid rgba(255,255,255,.08);}
+.card:hover {transform: translateY(-2px); box-shadow: 0 10px 24px rgba(0,0,0,.4);}
+.card.best {border:2px solid #fde68a; box-shadow: 0 0 0 3px rgba(253,230,138,.15), 0 10px 24px rgba(0,0,0,.45);}
+.card .tag {display:inline-block; font-size:.7rem; font-weight:700; color:#0f172a !important; background:#fde68a;
+            border-radius:999px; padding:2px 9px; margin-bottom:4px;}
+.mh {display:flex; align-items:center; justify-content:space-between; gap:10px; margin:6px 0 10px 0;
+     background: linear-gradient(135deg, rgba(99,102,241,.38), rgba(236,72,153,.26));
+     border:1px solid rgba(255,255,255,.16); border-radius:20px; padding:16px 18px; box-shadow:0 10px 28px rgba(0,0,0,.35);}
+.mh .side {flex:1; text-align:center; min-width:0;}
+.mh .nm {font-weight:800; font-size:1.05rem; color:#fff; overflow-wrap:anywhere;}
+.mh .xg {font-weight:800; font-size:2.3rem; color:#fde68a; line-height:1.1;}
+.mh .sb {font-size:.74rem; color:#cbd5e1;}
+.mh .mid {text-align:center; padding:0 6px;}
+.mh .vs {font-size:.68rem; color:#cbd5e1; letter-spacing:.08em;}
+.mh .sc {font-size:1.3rem; font-weight:800; color:#fff; background:rgba(0,0,0,.28); border-radius:12px;
+         padding:4px 14px; margin:4px 0;}
+.tbl tbody tr:nth-child(even) td {background:rgba(255,255,255,.035);}
+.tbl tbody tr:hover td {background:rgba(99,102,241,.2);}
+.tbl th:first-child {border-top-left-radius:10px;}
+.tbl th:last-child {border-top-right-radius:10px;}
+[data-testid="stMetric"] {background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.1);
+                          border-radius:14px; padding:10px 14px;}
+[data-testid="stMetricLabel"] * {color:#cbd5e1 !important;}
+[data-testid="stAlert"] {background:rgba(30,41,59,.92) !important; border:1px solid #6366f1; border-radius:12px;}
+[data-testid="stAlert"] * {color:#f1f5f9 !important;}
+[data-testid="stCaptionContainer"] * {color:#cbd5e1 !important;}
+.stButton > button {background:linear-gradient(90deg,#6366f1,#ec4899); color:#fff !important; border:none;
+                    border-radius:12px; font-weight:700; padding:.5rem 1rem;}
+.stButton > button:hover {filter:brightness(1.12);}
+[data-baseweb="tab-list"] {gap:6px; flex-wrap:nowrap; overflow-x:auto;}
+button[data-baseweb="tab"] {background:rgba(255,255,255,.06); border-radius:12px 12px 0 0; padding:8px 14px;
+                            white-space:nowrap;}
+button[data-baseweb="tab"][aria-selected="true"] {background:linear-gradient(90deg,#4f46e5,#9333ea);}
 /* Κινητό */
 @media (max-width: 640px) {
   .block-container {padding: 1rem 0.7rem 3rem 0.7rem;}
@@ -313,6 +348,26 @@ def _num(df, col):
     return pd.to_numeric(df[col], errors="coerce")
 
 
+def est_xg_from_shots(df):
+    # Εκτιμώμενο xG από σουτ: γκολ ≈ α·(σουτ εντός στόχου) + β·(σουτ εκτός), με α, β που βγαίνουν από τα δεδομένα
+    cols = ["HS", "AS", "HST", "AST"]
+    if not set(cols).issubset(df.columns) or len(df) < 30:
+        return None
+    d = {c: _num(df, c) for c in cols}
+    if any(d[c].notna().mean() < 0.8 for c in cols):
+        return None
+    hs, as_, hst, ast = (d[c].fillna(d[c].mean()) for c in cols)
+    hoff, aoff = (hs - hst).clip(lower=0), (as_ - ast).clip(lower=0)
+    X = np.column_stack([np.concatenate([hst.to_numpy(), ast.to_numpy()]),
+                         np.concatenate([hoff.to_numpy(), aoff.to_numpy()])])
+    y = np.concatenate([df["FTHG"].to_numpy(float), df["FTAG"].to_numpy(float)])
+    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+    coef = np.clip(coef, 0, None)
+    if not np.isfinite(coef).all() or coef.sum() <= 0:
+        return None
+    return coef[0] * hst + coef[1] * hoff, coef[0] * ast + coef[1] * aoff
+
+
 def goal_vectors(df, use_xg):
     hv = df["FTHG"].astype(float)
     av = df["FTAG"].astype(float)
@@ -323,6 +378,12 @@ def goal_vectors(df, use_xg):
             hv = (1 - XG_WEIGHT) * hv + XG_WEIGHT * hxg.fillna(hv)
             av = (1 - XG_WEIGHT) * av + XG_WEIGHT * axg.fillna(av)
             used = True
+    if use_xg and not used:
+        est = est_xg_from_shots(df)
+        if est is not None:
+            hv = (1 - XG_WEIGHT) * hv + XG_WEIGHT * est[0]
+            av = (1 - XG_WEIGHT) * av + XG_WEIGHT * est[1]
+            used = "est"
     return hv, av, used
 
 
@@ -427,13 +488,65 @@ def probs_from_lambdas(lh, la):
     return p, scores[:5]
 
 
-def analyse(df, home, away, use_xg, half_life):
+W_FORM, W_VENUE, W_TABLE = 0.12, 0.12, 0.10   # γκολ διόρθωσης ανά μονάδα διαφοράς (πολλαπλασιάζεται με την έμφαση)
+
+
+def _clip(x, lim=1.5):
+    return max(-lim, min(lim, float(x)))
+
+
+def team_signals(cur, team, venue, lg_gd):
+    # (φόρμα 5 αγώνων, δυναμική στην έδρα/εκτός, βαθμοί ανά αγώνα) ή None αν υπάρχουν λίγοι αγώνες
+    g = cur[(cur["HomeTeam"] == team) | (cur["AwayTeam"] == team)]
+    if len(g) < 3:
+        return None
+    is_home = (g["HomeTeam"] == team).to_numpy()
+    gf = np.where(is_home, g["FTHG"].to_numpy(float), g["FTAG"].to_numpy(float))
+    ga = np.where(is_home, g["FTAG"].to_numpy(float), g["FTHG"].to_numpy(float))
+    gd = gf - ga
+    pts = np.where(gd > 0, 3.0, np.where(gd == 0, 1.0, 0.0))
+    form = _clip(gd[-5:].mean() - gd.mean())          # τελευταίοι 5 σε σχέση με όλη τη σεζόν
+    vm = is_home if venue == "H" else ~is_home
+    gdv = gd[vm][-5:]
+    ven = _clip(gdv.mean() - lg_gd) if len(gdv) >= 3 else 0.0   # τελευταίοι 5 εντός (ή εκτός) σε σχέση με τον μέσο όρο
+    return form, ven, float(pts.mean())
+
+
+def form_shift(df, home, away, scale):
+    # Διόρθωση της αναμενόμενης διαφοράς γκολ από φόρμα 5 αγώνων, δυναμική εντός/εκτός και βαθμολογία.
+    if not scale or scale <= 0:
+        return 0.0, {}
+    cur = df[df["_cur"].astype(bool)] if "_cur" in df.columns else df
+    if len(cur) < 10:
+        return 0.0, {}
+    gdh = float((cur["FTHG"] - cur["FTAG"]).mean())
+    draws = int((cur["FTHG"] == cur["FTAG"]).sum())
+    avg_ppg = (3 * (len(cur) - draws) + 2 * draws) / (2 * len(cur))
+    sh = team_signals(cur, home, "H", gdh)
+    sa = team_signals(cur, away, "A", -gdh)
+    if sh is None or sa is None:
+        return 0.0, {}
+    parts = {"form": W_FORM * scale * (sh[0] - sa[0]),
+             "venue": W_VENUE * scale * (sh[1] - sa[1]),
+             "table": W_TABLE * scale * (_clip(sh[2] - avg_ppg) - _clip(sa[2] - avg_ppg))}
+    return sum(parts.values()), parts
+
+
+def apply_shift(lh, la, s):
+    return max(0.2, lh + s / 2), max(0.2, la - s / 2)
+
+
+def analyse(df, home, away, use_xg, half_life, adj_scale=0.0):
     hv, av, used_xg = goal_vectors(df, use_xg)
     ratings, lgh, lga = build_ratings(df, hv, av, half_life)
     lh = float(lgh * ratings.loc[home, "att"] * ratings.loc[away, "dfn"])
     la = float(lga * ratings.loc[away, "att"] * ratings.loc[home, "dfn"])
+    shift, parts = form_shift(df, home, away, adj_scale)
+    if shift:
+        lh, la = apply_shift(lh, la, shift)
     p, top = probs_from_lambdas(lh, la)
-    return {"p": p, "lh": lh, "la": la, "top": top, "ratings": ratings, "used_xg": used_xg}
+    return {"p": p, "lh": lh, "la": la, "top": top, "ratings": ratings, "used_xg": used_xg,
+            "shift": shift, "parts": parts}
 
 
 # ----------------------------------------------------------------------------
@@ -490,15 +603,27 @@ def esc(x):
     return html.escape(str(x))
 
 
-def card(label, prob, color):
+def card(label, prob, color, best=False):
     odds = 1 / max(prob, 1e-6)
+    tag = '<div class="tag">★ Πιο πιθανό</div>' if best else ""
     return (
-        f'<div class="card" style="border-top:6px solid {color}">'
+        f'<div class="card{" best" if best else ""}" style="border-top:6px solid {color}">{tag}'
         f'<div class="lbl">{esc(label)}</div>'
         f'<div class="pct">{prob * 100:.1f}%</div>'
         f'<div class="odd">Δίκαιη απόδοση: {odds:.2f}</div>'
         f'<div class="bar"><div style="width:{prob * 100:.0f}%;background:{color}"></div></div>'
         f'</div>'
+    )
+
+
+def match_header(home, away, lh, la, best):
+    return (
+        f'<div class="mh"><div class="side"><div class="nm">{esc(home)}</div><div class="xg">{lh:.2f}</div>'
+        f'<div class="sb">γηπεδούχος · αναμ. γκολ</div></div>'
+        f'<div class="mid"><div class="vs">ΠΙΘΑΝΟΤΕΡΟ ΣΚΟΡ</div><div class="sc">{best[1]} - {best[2]}</div>'
+        f'<div class="sb">σύνολο {lh + la:.2f}</div></div>'
+        f'<div class="side"><div class="nm">{esc(away)}</div><div class="xg">{la:.2f}</div>'
+        f'<div class="sb">φιλοξενούμενος · αναμ. γκολ</div></div></div>'
     )
 
 
@@ -807,7 +932,7 @@ def venue_stats(df, team, venue):
 
 
 @st.cache_data(show_spinner=False)
-def run_backtest(df, use_xg, half_life, min_prior=3):
+def run_backtest(df, use_xg, half_life, adj_scale=0.0, min_prior=3):
     """Προβλέπει κάθε αγώνα της τρέχουσας σεζόν μόνο με όσα ήταν γνωστά πριν από αυτόν."""
     cur = df["_cur"] if "_cur" in df.columns else pd.Series(True, index=df.index)
     book = None
@@ -816,7 +941,7 @@ def run_backtest(df, use_xg, half_life, min_prior=3):
             book = k
             break
     mpref = market_prefix(df)
-    counts, recs, bets, mrows = {}, [], [], []
+    counts, recs, bets, mrows, full = {}, [], [], [], []
     for i in range(len(df)):
         r = df.iloc[i]
         h, a = r["HomeTeam"], r["AwayTeam"]
@@ -834,10 +959,18 @@ def run_backtest(df, use_xg, half_life, min_prior=3):
             continue
         lh = float(lgh * ratings.loc[h, "att"] * ratings.loc[a, "dfn"])
         la = float(lga * ratings.loc[a, "att"] * ratings.loc[h, "dfn"])
+        s_, _parts = form_shift(sub, h, a, adj_scale)
+        if s_:
+            lh, la = apply_shift(lh, la, s_)
         p, _top = probs_from_lambdas(lh, la)
         hg, ag = int(r["FTHG"]), int(r["FTAG"])
         tot = hg + ag
         out = "1" if hg > ag else ("X" if hg == ag else "2")
+        xr_p = xray_probs(sub, h, a)[0]
+        full.append({"p1": p["1"], "pX": p["X"], "p2": p["2"], "out": out, "pu": p["U25"],
+                     "under": 1.0 if tot <= 2 else 0.0,
+                     "xp1": xr_p["1"] if xr_p else np.nan, "xpX": xr_p["X"] if xr_p else np.nan,
+                     "xp2": xr_p["2"] if xr_p else np.nan, "xpu": xr_p["U25"] if xr_p else np.nan})
 
         if mpref:
             mo = devig([_odd(r, mpref + "H"), _odd(r, mpref + "D"), _odd(r, mpref + "A")])
@@ -845,7 +978,9 @@ def run_backtest(df, use_xg, half_life, min_prior=3):
                 ou = devig([_odd(r, mpref + "<2.5"), _odd(r, mpref + ">2.5")])
                 mrows.append({"m1": p["1"], "mX": p["X"], "m2": p["2"], "k1": mo[0], "kX": mo[1], "k2": mo[2],
                               "out": out, "mu": p["U25"], "ku": ou[0] if ou else np.nan,
-                              "under": 1.0 if tot <= 2 else 0.0})
+                              "under": 1.0 if tot <= 2 else 0.0,
+                              "x1": xr_p["1"] if xr_p else np.nan, "xX": xr_p["X"] if xr_p else np.nan,
+                              "x2": xr_p["2"] if xr_p else np.nan})
 
         pk = max(("1", "X", "2"), key=lambda k: p[k])
         recs.append(("1Χ2", p[pk], pk == out))
@@ -867,10 +1002,24 @@ def run_backtest(df, use_xg, half_life, min_prior=3):
                 o = _odd(r, col)
                 if o and p[k] >= 0.30 and p[k] * o - 1 >= 0.05:
                     bets.append((o - 1) if out == k else -1.0)
-    return pd.DataFrame(recs, columns=["market", "prob", "hit"]), bets, book, pd.DataFrame(mrows), mpref
+    return (pd.DataFrame(recs, columns=["market", "prob", "hit"]), bets, book, pd.DataFrame(mrows), mpref,
+            pd.DataFrame(full))
 
 
-def render_accuracy(dfm, use_xg, half_life, code):
+def full_metrics(full):
+    if full is None or full.empty:
+        return None
+    P = full[["p1", "pX", "p2"]].to_numpy(float)
+    idx = full["out"].map({"1": 0, "X": 1, "2": 2}).to_numpy()
+    Y = np.eye(3)[idx]
+    brier = float(((P - Y) ** 2).sum(axis=1).mean())
+    ll = float(-np.log(np.clip(P[np.arange(len(P)), idx], 1e-9, 1)).mean())
+    acc = float((P.argmax(axis=1) == idx).mean())
+    bou = float(((full["pu"].to_numpy(float) - full["under"].to_numpy(float)) ** 2).mean())
+    return brier, ll, acc, bou
+
+
+def render_accuracy(dfm, use_xg, half_life, code, adj_scale=0.0):
     st.markdown('<div class="section">🧪 Πόσο σωστό είναι το μοντέλο;</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="note">Το πρόγραμμα «προβλέπει» κάθε αγώνα που έχει ήδη παιχτεί, χρησιμοποιώντας '
@@ -879,7 +1028,8 @@ def render_accuracy(dfm, use_xg, half_life, code):
     if not st.checkbox("▶️ Τρέξε τον έλεγχο (παίρνει λίγα δευτερόλεπτα)", key=f"bt_{code}"):
         return
     with st.spinner("Κάνω τον έλεγχο, περίμενε λίγο..."):
-        recs, bets, book, mk, mpref = run_backtest(dfm, use_xg, half_life)
+        recs, bets, book, mk, mpref, full = run_backtest(dfm, use_xg, half_life, adj_scale)
+        base_full = run_backtest(dfm, use_xg, half_life, 0.0)[5] if adj_scale > 0 else None
     if recs.empty:
         st.info("Δεν υπάρχουν αρκετοί αγώνες για έλεγχο. Ξαναδοκίμασε όταν έχουν παιχτεί περισσότερες αγωνιστικές.")
         return
@@ -902,6 +1052,29 @@ def render_accuracy(dfm, use_xg, half_life, code):
                 unsafe_allow_html=True)
     st.caption("«Πέτυχε» είναι πόσο συχνά βγήκε η πιο πιθανή επιλογή. «Έλεγε» είναι η μέση πιθανότητα που έδινε "
                "το μοντέλο. Αν το «Πέτυχε» είναι πολύ χαμηλότερο, το μοντέλο είναι υπερβολικά σίγουρο.")
+
+    if adj_scale > 0:
+        st.markdown('<div class="section">📈 Βοηθάει η φόρμα και η βαθμολογία;</div>', unsafe_allow_html=True)
+        m1, m0 = full_metrics(full), full_metrics(base_full)
+        if m1 and m0:
+            rows_f = [["Χωρίς διόρθωση", f"{m0[0]:.4f}", f"{m0[1]:.4f}", f"{m0[2] * 100:.1f}%", f"{m0[3]:.4f}"],
+                      ["Με διόρθωση (τρέχουσα ρύθμιση)", f"{m1[0]:.4f}", f"{m1[1]:.4f}", f"{m1[2] * 100:.1f}%",
+                       f"{m1[3]:.4f}"]]
+            st.markdown(html_table(["Έκδοση", "Σφάλμα 1Χ2 (Brier)", "Σφάλμα 1Χ2 (log)", "Πέτυχε 1Χ2",
+                                    "Σφάλμα Under/Over 2.5"], rows_f, hl_rows={0 if m0[0] <= m1[0] else 1}),
+                        unsafe_allow_html=True)
+            d = m1[0] - m0[0]
+            if d < -0.002:
+                msg = "✅ Η διόρθωση βελτιώνει τις προβλέψεις 1Χ2 σε αυτό το δείγμα."
+            elif d > 0.002:
+                msg = "❌ Η διόρθωση χειροτερεύει τις προβλέψεις 1Χ2 σε αυτό το δείγμα. Δοκίμασε μικρότερη έμφαση."
+            else:
+                msg = "➖ Η διόρθωση δεν αλλάζει ουσιαστικά την ακρίβεια."
+            st.markdown(f'<div class="pick">{msg}</div>', unsafe_allow_html=True)
+            st.caption("Μικρότερο σφάλμα = καλύτερα. Με λίγους αγώνες οι διαφορές μπορεί να είναι τύχη.")
+        else:
+            st.info("Δεν υπάρχουν αρκετοί αγώνες για σύγκριση.")
+    render_xray_compare(full, mk)
 
     st.markdown('<div class="section">⚖️ Μοντέλο ή αγορά;</div>', unsafe_allow_html=True)
     if mk.empty:
@@ -944,7 +1117,7 @@ def render_accuracy(dfm, use_xg, half_life, code):
         st.info("Δεν βρέθηκαν value στοιχήματα στο παρελθόν με αυτά τα κριτήρια, ή το αρχείο δεν έχει αποδόσεις.")
 
 
-def render_fixtures(dfm, fx, book, use_xg, half_life, w_mkt=0.0):
+def render_fixtures(dfm, fx, book, use_xg, half_life, w_mkt=0.0, adj_scale=0.0):
     st.markdown('<div class="section">📅 Ανάλυση όλης της αγωνιστικής</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="note">Το αρχείο αγωνιστικής (fixtures) το ανεβάζεις στο πάνω μέρος της σελίδας. '
@@ -988,6 +1161,9 @@ def render_fixtures(dfm, fx, book, use_xg, half_life, w_mkt=0.0):
             continue
         lh = float(lgh * ratings.loc[h, "att"] * ratings.loc[a, "dfn"])
         la = float(lga * ratings.loc[a, "att"] * ratings.loc[h, "dfn"])
+        s_, _parts = form_shift(dfm, h, a, adj_scale)
+        if s_:
+            lh, la = apply_shift(lh, la, s_)
         pm, _top = probs_from_lambdas(lh, la)
         odds = fixture_odds(row, book)
         p = blend_probs(pm, market_probs(odds), w_mkt)
@@ -1147,6 +1323,467 @@ def rank_safe(legs, W, cap, k=6.0):
     return sorted(best.values(), key=lambda r: -r["safe"])
 
 
+def backtest_grid(df, use_xg, half_life, adj_scales=(0.0, 1.0, 2.0, 3.0), last_n=120, min_prior=3):
+    # Προβλέπει τους τελευταίους αγώνες της τρέχουσας σεζόν, για όλες τις εντάσεις φόρμας/βαθμολογίας μαζί.
+    cur = df["_cur"].astype(bool).to_numpy() if "_cur" in df.columns else np.ones(len(df), dtype=bool)
+    idx = [i for i in range(len(df)) if cur[i]]
+    if len(idx) > last_n:
+        idx = [idx[int(j)] for j in np.linspace(0, len(idx) - 1, last_n)]
+    targets = set(idx)
+    mpref = market_prefix(df)
+    counts, rows = {}, {s: [] for s in adj_scales}
+    for i in range(len(df)):
+        r = df.iloc[i]
+        h, a = r["HomeTeam"], r["AwayTeam"]
+        ch, ca = counts.get(h, 0), counts.get(a, 0)
+        counts[h], counts[a] = ch + 1, ca + 1
+        if i not in targets or i < 20 or ch < min_prior or ca < min_prior:
+            continue
+        sub = df.iloc[:i]
+        hv, av, _ = goal_vectors(sub, use_xg)
+        res = build_ratings(sub, hv, av, half_life)
+        if res is None:
+            continue
+        ratings, lgh, lga = res
+        if h not in ratings.index or a not in ratings.index:
+            continue
+        lh0 = float(lgh * ratings.loc[h, "att"] * ratings.loc[a, "dfn"])
+        la0 = float(lga * ratings.loc[a, "att"] * ratings.loc[h, "dfn"])
+        s1, _parts = form_shift(sub, h, a, 1.0)
+        hg, ag = int(r["FTHG"]), int(r["FTAG"])
+        out = "1" if hg > ag else ("X" if hg == ag else "2")
+        mo = devig([_odd(r, mpref + "H"), _odd(r, mpref + "D"), _odd(r, mpref + "A")]) if mpref else None
+        for s in adj_scales:
+            lh, la = apply_shift(lh0, la0, s1 * s) if s1 * s else (lh0, la0)
+            p, _top = probs_from_lambdas(lh, la)
+            rows[s].append({"p1": p["1"], "pX": p["X"], "p2": p["2"], "out": out, "pu": p["U25"],
+                            "under": 1.0 if hg + ag <= 2 else 0.0,
+                            "k1": mo[0] if mo else np.nan, "kX": mo[1] if mo else np.nan,
+                            "k2": mo[2] if mo else np.nan})
+    return {s: pd.DataFrame(v) for s, v in rows.items()}
+
+
+def _pooled_arrays(p):
+    P = p[["p1", "pX", "p2"]].to_numpy(float)
+    idx = p["out"].map({"1": 0, "X": 1, "2": 2}).to_numpy()
+    Y = np.eye(3)[idx]
+    bm = ((P - Y) ** 2).sum(axis=1)
+    ll = -np.log(np.clip(P[np.arange(len(P)), idx], 1e-9, 1))
+    acc = (P.argmax(axis=1) == idx).astype(float)
+    bu = (p["pu"].to_numpy(float) - p["under"].to_numpy(float)) ** 2
+    return bm, ll, acc, bu
+
+
+REC_OPTS = (None, 15, 8, 4)
+ADJ_SCALES = (0.0, 1.0, 2.0, 3.0)
+ADJ_NAMES = {0.0: "Κανένα", 1.0: "Μικρό", 2.0: "Μεσαίο", 3.0: "Μεγάλο"}
+REC_NAMES = {v: k for k, v in RECENCY.items()}
+
+
+def league_seasons(leagues, prev_sets, lg):
+    olds = []
+    for pl in prev_sets:
+        key = lg if lg in pl else (next(iter(pl)) if len(pl) == 1 else None)
+        if key is not None:
+            olds.append(pl[key])
+    allv = [leagues[lg]] + olds
+    allv.sort(key=lambda d: d["_date"].max() if d["_date"].notna().any() else pd.Timestamp.min, reverse=True)
+    return allv
+
+
+def model_df_for_season(seasons, k, old_w):
+    # εκπαίδευση: η σεζόν k (βάρος 1) και οι παλιότερες (με μειωμένο βάρος). Δεν υπάρχουν «μελλοντικά» δεδομένα.
+    cur = seasons[k].copy()
+    cur["_w"], cur["_cur"] = 1.0, True
+    parts = []
+    for j, d in enumerate(seasons[k + 1:]):
+        d = d.copy()
+        d["_w"], d["_cur"] = old_w ** (j + 1), False
+        parts.append(d)
+    return pd.concat(parts[::-1] + [cur], ignore_index=True)
+
+
+def run_tuning(leagues, prev_sets, old_w, sel, last_n, cur_cfg, n_eval=2, progress=None):
+    jobs = []
+    for lg in sel:
+        seasons = league_seasons(leagues, prev_sets, lg)
+        for k in range(min(n_eval, len(seasons))):
+            jobs.append((lg, k, seasons))
+    store, order = {}, []
+    total, done = max(len(jobs) * len(REC_OPTS), 1), 0
+    for lg, k, seasons in jobs:
+        dfm = model_df_for_season(seasons, k, old_w)
+        can_xg = bool(goal_vectors(dfm, True)[2])
+        order.append((lg, k))
+        for hl in REC_OPTS:
+            g_f = backtest_grid(dfm, False, hl, ADJ_SCALES, last_n)
+            g_t = backtest_grid(dfm, True, hl, ADJ_SCALES, last_n) if can_xg else g_f
+            for s in ADJ_SCALES:
+                for xg, g in ((False, g_f), (True, g_t)):
+                    d = g[s]
+                    store.setdefault((hl, xg, s), {})[(lg, k)] = d.assign(lg=lg, k=k) if not d.empty else d
+            done += 1
+            if progress is not None:
+                progress.progress(min(done / total, 1.0))
+    pooled = {}
+    for key, per in store.items():
+        frames = [per[o] for o in order if o in per and not per[o].empty]
+        if frames:
+            pooled[key] = pd.concat(frames, ignore_index=True)
+    if not pooled:
+        return None
+    n_mode = pd.Series([len(p) for p in pooled.values()]).mode().iloc[0]
+    pooled = {k: p for k, p in pooled.items() if len(p) == n_mode}
+    arrays = {k: _pooled_arrays(p) for k, p in pooled.items()}
+    base = cur_cfg if cur_cfg in arrays else (None, True, 1.0)
+    base = base if base in arrays else next(iter(arrays))
+    bm_base = arrays[base][0]
+    rows = []
+    for k, (bm, ll, acc, bu) in arrays.items():
+        d = bm - bm_base
+        sd = d.std(ddof=1) if len(d) > 2 else 0.0
+        se = float(sd / np.sqrt(len(d))) if sd > 0 else 0.0
+        rows.append({"key": k, "brier": float(bm.mean()), "ll": float(ll.mean()), "acc": float(acc.mean()),
+                     "bu": float(bu.mean()), "delta": float(d.mean()), "z": float(d.mean() / se) if se > 0 else 0.0})
+    rows.sort(key=lambda r: r["brier"])
+    best = rows[0]["key"]
+
+    def per_season(key):
+        return pooled[key].assign(bm=arrays[key][0]).groupby("k")["bm"].agg(["mean", "size"])
+    sb, s0 = per_season(best), per_season(base)
+    by_season = [(int(k), int(sb.loc[k, "size"]), float(sb.loc[k, "mean"]), float(s0.loc[k, "mean"]))
+                 for k in sb.index if k in s0.index]
+    w_best = None
+    pk = pooled[best].dropna(subset=["k1"])
+    if len(pk) >= 30:
+        M = pk[["p1", "pX", "p2"]].to_numpy(float)
+        K = pk[["k1", "kX", "k2"]].to_numpy(float)
+        Y = np.eye(3)[pk["out"].map({"1": 0, "X": 1, "2": 2}).to_numpy()]
+        w_best = min([i / 20 for i in range(21)],
+                     key=lambda w: float((((1 - w) * M + w * K - Y) ** 2).sum(axis=1).mean()))
+    return {"rows": rows, "n": int(n_mode), "leagues": list(sel), "best": best, "base": base, "w_best": w_best,
+            "n_odds": int(len(pk)), "by_season": by_season, "n_seasons": int(max(k for _, k in order) + 1)}
+
+
+def apply_cfg(rec_name, xg, adj_name, w):
+    st.session_state["rec_pick"] = rec_name
+    st.session_state["xg_pick"] = xg
+    st.session_state["adj_pick"] = adj_name
+    if w is not None:
+        st.session_state["wmkt_pick"] = w
+
+
+def render_tuning(leagues, prev_sets, old_w, cur_cfg):
+    st.markdown('<div class="section">🔬 Ρύθμιση σε πολλά πρωταθλήματα</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="note">Τρέχει τον έλεγχο ακρίβειας σε πολλά πρωταθλήματα μαζί και δοκιμάζει συνδυασμούς ρυθμίσεων '
+        '(πρόσφατη φόρμα, xG ή εκτιμώμενο xG από σουτ, έμφαση σε φόρμα 5 αγώνων και βαθμολογία). Έτσι οι ρυθμίσεις '
+        'βγαίνουν από εκατοντάδες αγώνες και όχι από ένα πρωτάθλημα. Δουλεύει καλύτερα μετά το «Ενημέρωση όλων».</div>',
+        unsafe_allow_html=True)
+    codes = list(leagues.keys())
+    default = sorted(codes, key=lambda c: -len(leagues[c]))[:5]
+    sel = st.multiselect("Πρωταθλήματα για τον έλεγχο", codes, default=default, format_func=league_label,
+                         key="tune_sel")
+    last_n = st.slider("Πόσους αγώνες να δοκιμάσω ανά πρωτάθλημα και σεζόν", 60, 250, 100, 10, key="tune_n")
+    max_k = max(1, min(4, 1 + len(prev_sets)))
+    if max_k > 1:
+        n_eval = st.slider("Πόσες σεζόν να δοκιμάσω (η τρέχουσα και οι παλιότερες)", 1, max_k, min(2, max_k),
+                           key="tune_k")
+        st.caption("Κάθε σεζόν προσθέτει περίπου ένα λεπτό. Περισσότερες σεζόν = πιο αξιόπιστα συμπεράσματα.")
+    else:
+        n_eval = 1
+        st.caption("Για να δοκιμαστούν και παλιότερες σεζόν, ανέβασε περσινά αρχεία ή αύξησε τις περσινές σεζόν "
+                   "στο «Ενημέρωση όλων».")
+    if st.button("▶️ Τρέξε τη ρύθμιση (παίρνει 1-5 λεπτά)", key="tune_btn"):
+        if not sel:
+            st.warning("Διάλεξε τουλάχιστον ένα πρωτάθλημα.")
+        else:
+            bar = st.progress(0.0)
+            with st.spinner("Δοκιμάζω τους συνδυασμούς, περίμενε..."):
+                st.session_state["tune_res"] = run_tuning(leagues, prev_sets, old_w, sel, last_n, cur_cfg, n_eval, bar)
+    tr = st.session_state.get("tune_res")
+    if not tr:
+        return
+    rows, base, best = tr["rows"], tr["base"], tr["best"]
+
+    def label(k):
+        return f'{REC_NAMES.get(k[0], k[0])} · {"ναι" if k[1] else "όχι"} · {ADJ_NAMES[k[2]]}'
+    show = rows[:8]
+    if base not in [r["key"] for r in show]:
+        show = show + [r for r in rows if r["key"] == base]
+    table = []
+    for r in show:
+        if r["key"] == base:
+            verdict = "Τρέχουσες ρυθμίσεις"
+        elif r["delta"] < 0 and abs(r["z"]) > 2:
+            verdict = '<span class="good">✅ σαφώς καλύτερο</span>'
+        elif r["delta"] > 0 and abs(r["z"]) > 2:
+            verdict = '<span class="bad">❌ σαφώς χειρότερο</span>'
+        else:
+            verdict = '<span class="mid">➖ αδιευκρίνιστο</span>'
+        table.append([label(r["key"]), f'{r["brier"]:.4f}', f'{r["ll"]:.4f}', f'{r["acc"] * 100:.1f}%',
+                      f'{r["bu"]:.4f}', f'{r["delta"]:+.4f}', verdict])
+    st.markdown(f'<div class="sub">Αποτελέσματα από {tr["n"]} αγώνες, {len(tr["leagues"])} πρωταθλήματα, '
+                f'{tr.get("n_seasons", 1)} σεζόν</div>',
+                unsafe_allow_html=True)
+    st.markdown(html_table(["Πρόσφατη φόρμα · xG · έμφαση", "Σφάλμα 1Χ2 (Brier)", "Σφάλμα (log)", "Πέτυχε 1Χ2",
+                            "Σφάλμα Under/Over 2.5", "Διαφορά από τρέχουσες", "Κρίση"], table,
+                           hl_rows={0}, left=(0,)), unsafe_allow_html=True)
+    b = rows[0]
+    if best == base:
+        st.markdown('<div class="pick">Οι τρέχουσες ρυθμίσεις είναι οι καλύτερες από όσες δοκιμάστηκαν.</div>',
+                    unsafe_allow_html=True)
+    else:
+        sure = b["delta"] < 0 and abs(b["z"]) > 2
+        st.markdown(
+            f'<div class="pick">Καλύτερος συνδυασμός: <b>{label(best)}</b> '
+            f'({b["delta"]:+.4f} στο σφάλμα). '
+            f'{"Η διαφορά είναι στατιστικά σαφής." if sure else "Η διαφορά ΔΕΝ είναι στατιστικά σαφής, μπορεί να είναι τύχη."}'
+            f'</div>', unsafe_allow_html=True)
+    bys = tr.get("by_season") or []
+    if best != base and len(bys) > 1:
+        names = {0: "Τρέχουσα", 1: "Περσινή", 2: "Προπέρσινη"}
+        st.markdown('<div class="sub">Σταθερότητα ανά σεζόν (καλύτερος συνδυασμός σε σχέση με τις τρέχουσες ρυθμίσεις)'
+                    '</div>', unsafe_allow_html=True)
+        st.markdown(html_table(["Σεζόν", "Αγώνες", "Καλύτερος", "Τρέχουσες", "Διαφορά"],
+                               [[names.get(k, f"Πριν {k} χρόνια"), n, f"{mb:.4f}", f"{m0:.4f}", f"{mb - m0:+.4f}"]
+                                for k, n, mb, m0 in bys], left=(0,)), unsafe_allow_html=True)
+        better = sum(1 for _, _, mb, m0 in bys if mb < m0)
+        st.caption(f"Ο καλύτερος συνδυασμός βγαίνει καλύτερος σε {better} από {len(bys)} σεζόν. "
+                   f"Αν βγαίνει καλύτερος σε όλες, είναι πιο αξιόπιστο.")
+    w_best = tr.get("w_best")
+    w_opt = None
+    if w_best is not None:
+        w_opt = min([0.0, 0.25, 0.5, 0.75], key=lambda w: abs(w - w_best))
+        st.markdown(f'<div class="note">Καλύτερο βάρος αγοράς σε αυτά τα δεδομένα: <b>{w_best * 100:.0f}%</b> '
+                    f'(από {tr["n_odds"]} αγώνες με αποδόσεις). Το ρυθμιστικό δίνει επιλογές έως 75%.</div>',
+                    unsafe_allow_html=True)
+    st.button("✅ Εφάρμοσε τον καλύτερο συνδυασμό στις Ρυθμίσεις", key="tune_apply", on_click=apply_cfg,
+              args=(REC_NAMES.get(best[0], "Κανένα"), bool(best[1]), ADJ_NAMES[best[2]], w_opt))
+    st.caption("Ο «καλύτερος» από πολλούς συνδυασμούς είναι συχνά απλώς ο πιο τυχερός. Εμπιστεύσου μόνο όσα "
+               "σημειώνονται ως «σαφώς καλύτερο». Το σφάλμα Brier είναι μικρότερο όταν οι προβλέψεις είναι "
+               "καλύτερες.")
+
+
+XR_W = {"season": 0.25, "venue": 0.30, "v6": 0.20, "a6": 0.15, "a4": 0.05, "a2": 0.05}
+XR_MIN = {"season": 5, "venue": 3, "v6": 3, "a6": 3, "a4": 3, "a2": 2}
+XR_EVENTS = ["W", "D", "L", "O25", "U25", "O15", "U15", "GG", "NG"]
+
+
+def _xr_arr(df, team):
+    g = df[(df["HomeTeam"] == team) | (df["AwayTeam"] == team)]
+    if g.empty:
+        return None
+    is_home = (g["HomeTeam"] == team).to_numpy()
+    gf = np.where(is_home, g["FTHG"].to_numpy(float), g["FTAG"].to_numpy(float))
+    ga = np.where(is_home, g["FTAG"].to_numpy(float), g["FTHG"].to_numpy(float))
+    cur = g["_cur"].astype(bool).to_numpy() if "_cur" in g.columns else np.ones(len(g), dtype=bool)
+    return gf, ga, is_home, cur
+
+
+def _xr_rates(gf, ga):
+    n = len(gf)
+    tot = gf + ga
+    return {"n": n, "W": float(np.mean(gf > ga)), "D": float(np.mean(gf == ga)), "L": float(np.mean(gf < ga)),
+            "O25": float(np.mean(tot >= 3)), "U25": float(np.mean(tot <= 2)),
+            "O15": float(np.mean(tot >= 2)), "U15": float(np.mean(tot <= 1)),
+            "GG": float(np.mean((gf > 0) & (ga > 0))), "NG": float(np.mean((gf == 0) | (ga == 0))),
+            "goals": float(np.mean(tot))}
+
+
+def xray_team(df, team, venue):
+    # Ποσοστά ανά διάστημα, από την οπτική της ομάδας (venue: "H" = εντός έδρας, "A" = εκτός)
+    arr = _xr_arr(df, team)
+    out = {}
+    if arr is None:
+        return out
+    gf, ga, is_home, cur = arr
+    vm = is_home if venue == "H" else ~is_home
+
+    def put(key, mask=None, last=None):
+        idx = np.where(mask)[0] if mask is not None else np.arange(len(gf))
+        if last:
+            idx = idx[-last:]
+        if len(idx) >= XR_MIN[key]:
+            out[key] = _xr_rates(gf[idx], ga[idx])
+    put("season", cur)
+    put("venue", cur & vm)
+    put("v6", vm, 6)
+    put("a6", None, 6)
+    put("a4", None, 4)
+    put("a2", None, 2)
+    return out
+
+
+def xray_probs(df, home, away):
+    th, ta = xray_team(df, home, "H"), xray_team(df, away, "A")
+    acc = {k: 0.0 for k in ("1", "X", "2", "O25", "U25", "O15", "U15", "GG", "NG")}
+    wsum = 0.0
+    for w, wt in XR_W.items():
+        if w in th and w in ta:
+            a, b = th[w], ta[w]
+            vals = {"1": (a["W"] + b["L"]) / 2, "X": (a["D"] + b["D"]) / 2, "2": (a["L"] + b["W"]) / 2}
+            for ev in ("O25", "U25", "O15", "U15", "GG", "NG"):
+                vals[ev] = (a[ev] + b[ev]) / 2
+            for k, v in vals.items():
+                acc[k] += wt * v
+            wsum += wt
+    if wsum == 0:
+        return None, th, ta
+    p = {k: v / wsum for k, v in acc.items()}
+    s = p["1"] + p["X"] + p["2"]
+    if s <= 0:
+        return None, th, ta
+    p["1"], p["X"], p["2"] = p["1"] / s, p["X"] / s, p["2"] / s
+    p["1X"], p["X2"], p["12"] = p["1"] + p["X"], p["X"] + p["2"], p["1"] + p["2"]
+    p["DNB1"] = p["1"] / (p["1"] + p["2"]) if (p["1"] + p["2"]) > 0 else 0.0
+    p["DNB2"] = 1 - p["DNB1"]
+    return p, th, ta
+
+
+def render_xray(dfm, home, away, p_ours, odds_in):
+    st.markdown('<div class="section">🔍 Ακτινογραφία (μέθοδος ποσοστών)</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="note">Υπολογίζει αυτόματα ό,τι συμπλήρωνες με το χέρι: πόσες φορές βγήκε κάθε σημείο στους αγώνες '
+        'κάθε ομάδας, σε διαφορετικά διαστήματα (σεζόν, εντός/εκτός έδρας, τελευταία 6, 4 και 2 ματς). Οι τύποι του '
+        'αρχείου που μου έδειξες δεν φαίνονται, οπότε τα βάρη των διαστημάτων είναι δικά μου και φαίνονται κάτω. '
+        'Ο αγώνας είναι αυτός που διάλεξες στην κορυφή.</div>', unsafe_allow_html=True)
+    probs, th, ta = xray_probs(dfm, home, away)
+    if probs is None:
+        st.info("Δεν υπάρχουν αρκετοί αγώνες των δύο ομάδων για την ακτινογραφία.")
+        return
+    names = {"season": "Σεζόν (όλοι)", "venue": "Σεζόν εντός/εκτός", "v6": "Τελευταία 6 εντός/εκτός",
+             "a6": "Τελευταία 6 (όλοι)", "a4": "Τελευταία 4", "a2": "Τελευταία 2"}
+    heads = ["Διάστημα", "Αγώνες", "Νίκη", "Ισοπ.", "Ήττα", "Over 2.5", "Under 2.5", "Over 1.5", "Under 1.5",
+             "ΓΓ", "ΟΧΙ ΓΓ", "Μ.Ο. γκολ"]
+
+    def table(team, tt, label):
+        rows = []
+        for k in ("season", "venue", "v6", "a6", "a4", "a2"):
+            if k in tt:
+                r = tt[k]
+                rows.append([names[k].replace("εντός/εκτός", label)] + [r["n"]] +
+                            [f"{r[e] * 100:.0f}%" for e in XR_EVENTS] + [f"{r['goals']:.2f}"])
+        st.markdown(f"**{esc(team)}** ({label})", unsafe_allow_html=True)
+        st.markdown(html_table(heads, rows, left=(0,)), unsafe_allow_html=True)
+    table(home, th, "εντός")
+    table(away, ta, "εκτός")
+
+    pts = [("1", "1 (νίκη γηπεδούχου)"), ("X", "Χ (ισοπαλία)"), ("2", "2 (νίκη φιλοξενούμενου)"), ("1X", "1Χ"),
+           ("X2", "Χ2"), ("12", "12"), ("O25", "Over 2.5"), ("U25", "Under 2.5"), ("O15", "Over 1.5"),
+           ("U15", "Under 1.5"), ("GG", "Γκολ-Γκολ ΝΑΙ"), ("NG", "Γκολ-Γκολ ΟΧΙ"), ("DNB1", "1 No Draw"),
+           ("DNB2", "2 No Draw")]
+    ours = dict(p_ours)
+    ours["DNB1"] = ours["1"] / (ours["1"] + ours["2"])
+    ours["DNB2"] = 1 - ours["DNB1"]
+    rows = []
+    for k, label in pts:
+        px = probs[k]
+        o = odds_in.get(k, 0.0) if k in odds_in else 0.0
+        if o and o > 1:
+            ev = px * o - 1
+            val = (f'<span class="good">✅ Value ({ev * 100:+.0f}%)</span>' if ev > 0
+                   else f'<span class="mid">— ({ev * 100:+.0f}%)</span>')
+            ot = f"{o:.2f}"
+        else:
+            val, ot = "-", "-"
+        rows.append([label, f"<b>{px * 100:.1f}%</b>", f"{ours[k] * 100:.1f}%", f"{1 / max(px, 1e-6):.2f}", ot, val])
+    st.markdown('<div class="section">📋 Πιθανότητες και δίκαιες αποδόσεις</div>', unsafe_allow_html=True)
+    st.markdown(html_table(["Σημείο", "Ακτινογραφία", "Δικό μας μοντέλο", "Δίκαιη απόδοση", "Η απόδοσή σου",
+                            "Value (κανόνας ακτινογραφίας)"], rows, left=(0,)), unsafe_allow_html=True)
+    st.caption("Κανόνας της ακτινογραφίας: αν η απόδοση του στοιχηματικού είναι μεγαλύτερη από τη δίκαιη, το σημείο "
+               "είναι value. Οι αποδόσεις γράφονται στην καρτέλα Value. Βάρη διαστημάτων: σεζόν 25%, εντός/εκτός "
+               "30%, τελευταία 6 εντός/εκτός 20%, τελευταία 6 15%, τελευταία 4 5%, τελευταία 2 5%. "
+               "Πριν εμπιστευτείς το value της, δες στην καρτέλα Ακρίβεια ποιο μοντέλο προβλέπει καλύτερα.")
+
+
+def paired_verdict(bm_a, bm_b):
+    # a = ακτινογραφία, b = δικό μας. Μικρότερο σφάλμα = καλύτερο.
+    d = bm_a - bm_b
+    sd = d.std(ddof=1) if len(d) > 2 else 0.0
+    se = sd / np.sqrt(len(d)) if sd > 0 else 0.0
+    z = d.mean() / se if se > 0 else 0.0
+    if d.mean() < 0 and abs(z) > 2:
+        return "✅ Η ακτινογραφία είναι σαφώς καλύτερη από το δικό μας μοντέλο."
+    if d.mean() > 0 and abs(z) > 2:
+        return "❌ Το δικό μας μοντέλο είναι σαφώς καλύτερο από την ακτινογραφία."
+    return "➖ Δεν υπάρχει σαφής διαφορά ανάμεσα στα δύο μοντέλα σε αυτό το δείγμα."
+
+
+def render_xray_compare(full, mk):
+    st.markdown('<div class="section">🔍 Δικό μας μοντέλο ή Ακτινογραφία;</div>', unsafe_allow_html=True)
+    sub = full.dropna(subset=["xp1"]) if "xp1" in full.columns else full.iloc[0:0]
+    if len(sub) < 20:
+        st.info("Δεν υπάρχουν αρκετοί αγώνες για σύγκριση με την ακτινογραφία.")
+        return
+    idx = sub["out"].map({"1": 0, "X": 1, "2": 2}).to_numpy()
+    Y = np.eye(3)[idx]
+    M = sub[["p1", "pX", "p2"]].to_numpy(float)
+    X = sub[["xp1", "xpX", "xp2"]].to_numpy(float)
+
+    def stats(P):
+        bm = ((P - Y) ** 2).sum(axis=1)
+        ll = -np.log(np.clip(P[np.arange(len(P)), idx], 1e-9, 1))
+        return bm, float(ll.mean()), float((P.argmax(axis=1) == idx).mean())
+    under = sub["under"].to_numpy(float)
+    rows, bms = [], {}
+    for name, P, pu in (("Δικό μας μοντέλο", M, sub["pu"].to_numpy(float)),
+                        ("Ακτινογραφία", X, sub["xpu"].to_numpy(float)),
+                        ("Μίξη 50-50", (M + X) / 2, (sub["pu"].to_numpy(float) + sub["xpu"].to_numpy(float)) / 2)):
+        bm, ll, acc = stats(P)
+        bms[name] = bm
+        rows.append([name, f"{bm.mean():.4f}", f"{ll:.4f}", f"{acc * 100:.1f}%", f"{np.mean((pu - under) ** 2):.4f}"])
+    st.markdown(f'<div class="sub">{len(sub)} αγώνες</div>', unsafe_allow_html=True)
+    st.markdown(html_table(["Πηγή πιθανοτήτων", "Σφάλμα 1Χ2 (Brier)", "Σφάλμα (log)", "Πέτυχε 1Χ2",
+                            "Σφάλμα Under/Over 2.5"], rows, left=(0,),
+                           hl_rows={int(np.argmin([float(r[1]) for r in rows]))}), unsafe_allow_html=True)
+    st.markdown(f'<div class="pick">{paired_verdict(bms["Ακτινογραφία"], bms["Δικό μας μοντέλο"])}</div>',
+                unsafe_allow_html=True)
+    if mk is not None and not mk.empty and "x1" in mk.columns:
+        sm = mk.dropna(subset=["x1"])
+        if len(sm) >= 20:
+            idx2 = sm["out"].map({"1": 0, "X": 1, "2": 2}).to_numpy()
+            Y2 = np.eye(3)[idx2]
+            parts = (("Δικό μας μοντέλο", sm[["m1", "mX", "m2"]].to_numpy(float)),
+                     ("Ακτινογραφία", sm[["x1", "xX", "x2"]].to_numpy(float)),
+                     ("Αγορά (χωρίς περιθώριο)", sm[["k1", "kX", "k2"]].to_numpy(float)))
+            rows2 = []
+            for name, P in parts:
+                bm = ((P - Y2) ** 2).sum(axis=1)
+                ll = -np.log(np.clip(P[np.arange(len(P)), idx2], 1e-9, 1))
+                rows2.append([name, f"{bm.mean():.4f}", f"{ll.mean():.4f}",
+                              f"{(P.argmax(axis=1) == idx2).mean() * 100:.1f}%"])
+            st.markdown(f'<div class="sub">Σε σύγκριση με την αγορά ({len(sm)} αγώνες με αποδόσεις)</div>',
+                        unsafe_allow_html=True)
+            st.markdown(html_table(["Πηγή πιθανοτήτων", "Σφάλμα 1Χ2 (Brier)", "Σφάλμα (log)", "Πέτυχε 1Χ2"], rows2,
+                                   left=(0,), hl_rows={int(np.argmin([float(r[1]) for r in rows2]))}),
+                        unsafe_allow_html=True)
+    st.caption("Μικρότερο σφάλμα = καλύτερες προβλέψεις. Με λίγους αγώνες οι διαφορές μπορεί να είναι τύχη.")
+
+
+def render_form_block(df, home, away, res, adj_scale):
+    lt = league_table(df)
+    pos = {r[0]: (i + 1, r[8]) for i, r in enumerate(lt)}
+    rows = []
+    for team, venue, label in ((home, "H", "εντός"), (away, "A", "εκτός")):
+        vs = venue_stats(df, team, venue)
+        pp = pos.get(team)
+        rows.append([f"{esc(team)} ({label})", f"{pp[0]}η" if pp else "-", str(pp[1]) if pp else "-",
+                     form_badges(df, team), vs[7] if vs else "-", vs[6] if vs else "-"])
+    st.markdown('<div class="section">📈 Φόρμα, δυναμική και βαθμολογία</div>', unsafe_allow_html=True)
+    st.markdown(html_table(["Ομάδα", "Θέση", "Βαθμοί", "Φόρμα (τελευταίοι 5)", "Τελευταίοι 5 εντός/εκτός",
+                            "Βαθμοί/αγώνα εντός/εκτός"], rows, left=(0,)), unsafe_allow_html=True)
+    s, parts = res.get("shift", 0.0), res.get("parts", {})
+    if adj_scale > 0 and abs(s) > 0.005:
+        who = home if s > 0 else away
+        st.markdown(
+            f'<div class="note">Η φόρμα, η δυναμική εντός/εκτός και η βαθμολογία μετακινούν την αναμενόμενη διαφορά '
+            f'κατά <b>{abs(s):.2f} γκολ υπέρ {esc(who)}</b> (φόρμα {parts["form"]:+.2f}, εντός/εκτός '
+            f'{parts["venue"]:+.2f}, βαθμολογία {parts["table"]:+.2f}).</div>', unsafe_allow_html=True)
+    elif adj_scale > 0:
+        st.caption("Η φόρμα και η βαθμολογία δεν αλλάζουν ουσιαστικά την πρόβλεψη σε αυτόν τον αγώνα.")
+
+
 def render_safe_rows(rows, min_odds):
     if not rows:
         st.info(f"Δεν βρέθηκε επιλογή με δίκαιη απόδοση πάνω από {min_odds:.2f}. Χαμήλωσε την ελάχιστη απόδοση.")
@@ -1204,9 +1841,70 @@ def render_safe_bets(home, away, lh, la, dfm, mkt):
     render_safe_rows(rank_safe(legs, M, 1 / min_odds), min_odds)
 
 
+THEMES = {
+    "🌌 Βιολετί νύχτα": None,
+    "🌿 Πράσινο γήπεδο": {
+        "bg": ("#04120b", "#052e1b", "#065f46"), "a1": "#10b981", "a2": "#84cc16", "a3": "#facc15",
+        "p1": "#059669", "p2": "#0d9488", "th": "#065f46", "ring": "#34d399", "exp": "#047857",
+        "rgb1": "16,185,129", "rgb2": "132,204,22"},
+    "🌊 Ωκεανός": {
+        "bg": ("#020617", "#0c1a3a", "#0c4a6e"), "a1": "#0ea5e9", "a2": "#22d3ee", "a3": "#38bdf8",
+        "p1": "#0284c7", "p2": "#0891b2", "th": "#075985", "ring": "#38bdf8", "exp": "#0369a1",
+        "rgb1": "14,165,233", "rgb2": "34,211,238"},
+    "🌅 Ηλιοβασίλεμα": {
+        "bg": ("#1c0a05", "#3b0d11", "#7c2d12"), "a1": "#f97316", "a2": "#ef4444", "a3": "#fbbf24",
+        "p1": "#ea580c", "p2": "#dc2626", "th": "#9a3412", "ring": "#fb923c", "exp": "#c2410c",
+        "rgb1": "249,115,22", "rgb2": "239,68,68"},
+    "🖤 Γραφίτης": {
+        "bg": ("#0a0a0a", "#171717", "#262626"), "a1": "#475569", "a2": "#64748b", "a3": "#7c8aa0",
+        "p1": "#334155", "p2": "#475569", "th": "#334155", "ring": "#94a3b8", "exp": "#475569",
+        "rgb1": "100,116,139", "rgb2": "148,163,184"},
+}
+THEME_NAMES = list(THEMES.keys())
+
+
+def themed_css(css, t):
+    # Αλλάζει τα χρώματα του CSS με βάση το θέμα. Το None είναι το αρχικό θέμα.
+    if not t:
+        return css
+    css = css.replace("linear-gradient(135deg,#0f172a 0%,#1e1b4b 55%,#312e81 100%)",
+                      f"linear-gradient(135deg,{t['bg'][0]} 0%,{t['bg'][1]} 55%,{t['bg'][2]} 100%)")
+    css = css.replace("linear-gradient(90deg,#6366f1,#ec4899,#f59e0b)",
+                      f"linear-gradient(90deg,{t['a1']},{t['a2']},{t['a3']})")
+    for old, new in (("#4f46e5", t["p1"]), ("#9333ea", t["p2"]), ("#3730a3", t["th"]), ("#818cf8", t["ring"]),
+                     ("#4338ca", t["exp"]), ("#6366f1", t["a1"]), ("#ec4899", t["a2"]),
+                     ("99,102,241", t["rgb1"]), ("236,72,153", t["rgb2"])):
+        css = css.replace(old, new)
+    return css
+
+
+def next_theme():
+    cur = st.session_state.get("theme_name", THEME_NAMES[0])
+    i = (THEME_NAMES.index(cur) + 1) % len(THEME_NAMES) if cur in THEME_NAMES else 0
+    st.session_state["theme_name"] = THEME_NAMES[i]
+    try:
+        st.query_params["tema"] = str(i)
+    except Exception:
+        pass
+
+
+def init_theme():
+    if "theme_name" not in st.session_state:
+        name = THEME_NAMES[0]
+        try:
+            q = st.query_params.get("tema")
+            if q is not None and str(q).isdigit() and int(q) < len(THEME_NAMES):
+                name = THEME_NAMES[int(q)]
+        except Exception:
+            pass
+        st.session_state["theme_name"] = name
+    return st.session_state["theme_name"]
+
+
 def main():
     st.set_page_config(page_title="Ανάλυση Αγώνων", page_icon="⚽", layout="centered")
-    st.markdown(CSS, unsafe_allow_html=True)
+    tname = init_theme()
+    st.markdown(themed_css(CSS, THEMES[tname]), unsafe_allow_html=True)
     st.markdown(
         '<div class="hero"><div><h1>⚽ Ανάλυση Αγώνων</h1>'
         '<p>Ανέβασε το CSV του πρωταθλήματος, διάλεξε γηπεδούχο και φιλοξενούμενο '
@@ -1218,10 +1916,12 @@ def main():
 
     allowed = ["csv", "xlsx", "xls", "xml", "txt"]
     st.markdown('<div class="section">⚡ Αυτόματη ενημέρωση (ένα κουμπί)</div>', unsafe_allow_html=True)
+    st.button(f"🎨 Άλλαξε χρώματα · τώρα: {tname}", key="theme_btn", on_click=next_theme)
     st.markdown('<div class="note">Πάτα το κουμπί και το πρόγραμμα κατεβάζει μόνο του από το football-data.co.uk '
                 'τα αποτελέσματα της τρέχουσας σεζόν, τις περσινές και την αγωνιστική με τις αποδόσεις. '
                 'Δεν χρειάζεται να ανεβάσεις αρχεία.</div>', unsafe_allow_html=True)
-    n_prev = st.select_slider("Πόσες περσινές σεζόν να φορτώσω", options=[0, 1, 2], value=1, key="fb_nprev")
+    n_prev = st.select_slider("Πόσες περσινές σεζόν να φορτώσω (περισσότερες = πιο αργή λήψη)",
+                             options=[0, 1, 2, 3, 4], value=2, key="fb_nprev")
     a1, a2 = st.columns(2)
     if a1.button("⬇️ Ενημέρωση όλων", key="fb_auto_btn"):
         try:
@@ -1322,11 +2022,20 @@ def main():
         st.warning("Διάλεξε διαφορετικές ομάδες.")
         return
 
+    for _k, _v in (("rec_pick", "Κανένα"), ("xg_pick", True), ("adj_pick", "Μικρό"), ("wmkt_pick", 0.0)):
+        st.session_state.setdefault(_k, _v)
     with st.expander("⚙️ Ρυθμίσεις μοντέλου"):
         rec_name = st.select_slider(
             "Βάρος πρόσφατης φόρμας (οι πιο πρόσφατοι αγώνες μετράνε περισσότερο)",
-            options=list(RECENCY.keys()), value="Κανένα")
-        use_xg = st.checkbox("Χρήση xG (αν υπάρχει στο αρχείο)", value=True)
+            options=list(RECENCY.keys()), key="rec_pick")
+        use_xg = st.checkbox("Χρήση xG, ή εκτιμώμενου xG από τα σουτ όταν λείπει (αν υπάρχουν στο αρχείο)",
+                             key="xg_pick")
+        adj_name = st.select_slider("Έμφαση στη φόρμα 5 αγώνων, στη δυναμική εντός/εκτός και στη βαθμολογία",
+                                    options=["Κανένα", "Μικρό", "Μεσαίο", "Μεγάλο"], key="adj_pick")
+        adj_scale = {"Κανένα": 0.0, "Μικρό": 1.0, "Μεσαίο": 2.0, "Μεγάλο": 3.0}[adj_name]
+        st.caption("Προσθέτει στο μοντέλο μια μικρή διόρθωση: πώς πάνε οι ομάδες στους τελευταίους 5 αγώνες, "
+                   "πώς πάει η γηπεδούχος στις τελευταίες 5 εντός έδρας και η φιλοξενούμενη στις τελευταίες 5 "
+                   "εκτός, και η θέση τους στη βαθμολογία. Στην καρτέλα Ακρίβεια φαίνεται αν βοηθάει.")
         old_w = 0.5
         if prev_sets:
             old_w = st.select_slider("Βάρος των αγώνων από περσινές σεζόν", options=[0.25, 0.5, 0.75],
@@ -1339,7 +2048,8 @@ def main():
                 book = st.selectbox("Αποδόσεις από (για το Value και την Αγωνιστική)", [k for k, _ in avail],
                                     format_func=lambda k: bnames[k], key="book_pick")
         w_mkt = st.select_slider("Συνδυασμός με την αγορά: βάρος των αποδόσεων στην τελική πιθανότητα",
-                                 options=[0.0, 0.25, 0.5, 0.75], value=0.0, format_func=lambda x: f"{int(x * 100)}%")
+                                 options=[0.0, 0.25, 0.5, 0.75], key="wmkt_pick",
+                                 format_func=lambda x: f"{int(x * 100)}%")
         st.caption("Με 0% βλέπεις μόνο το μοντέλο. Αν υπάρχουν αποδόσεις (αυτόματα από το fixtures ή γραμμένες από "
                    "σένα), μπαίνουν στη μίξη για 1Χ2, διπλή ευκαιρία και Under/Over 2.5. Στην καρτέλα Ακρίβεια "
                    "φαίνεται ποιο βάρος βγάζει τα καλύτερα αποτελέσματα.")
@@ -1350,7 +2060,7 @@ def main():
     if n_old:
         st.caption(f"Το μοντέλο χρησιμοποιεί και {n_old} αγώνες από προηγούμενες σεζόν.")
 
-    res = analyse(dfm, home, away, use_xg, half_life)
+    res = analyse(dfm, home, away, use_xg, half_life, adj_scale)
     p_model, lh, la = res["p"], res["lh"], res["la"]
     p = p_model
     ratings = res["ratings"]
@@ -1363,9 +2073,9 @@ def main():
             unsafe_allow_html=True,
         )
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(
         ["🎯 Ανάλυση", "💰 Value", "🚩 Κόρνερ/Κάρτες", "📊 Ομάδες", "🏆 Βαθμολογία", "📅 Αγωνιστική",
-         "🧪 Ακρίβεια", "🛡️ Ασφαλή"])
+         "🧪 Ακρίβεια", "🛡️ Ασφαλή", "🔬 Ρύθμιση", "🔍 Ακτινογραφία"])
 
     # ------------------------------------------------------------------ VALUE
     odds_in = {}
@@ -1416,16 +2126,15 @@ def main():
                 st.info("Έβαλες βάρος αγοράς αλλά δεν υπάρχουν αποδόσεις για αυτόν τον αγώνα. Δες την καρτέλα Value.")
         st.markdown('<div class="section">🎯 Αναμενόμενο σκορ</div>', unsafe_allow_html=True)
         best = res["top"][0]
-        st.markdown(
-            f'<div class="pick">Αναμενόμενα γκολ: <b>{esc(home)} {lh:.2f}</b> - <b>{la:.2f} {esc(away)}</b> '
-            f'(σύνολο {lh + la:.2f})<br>Πιθανότερο ακριβές σκορ: <b>{best[1]}-{best[2]}</b></div>',
-            unsafe_allow_html=True)
+        st.markdown(match_header(home, away, lh, la, best), unsafe_allow_html=True)
+        render_form_block(df, home, away, res, adj_scale)
 
         st.markdown('<div class="section">1️⃣ ❎ 2️⃣  Αποτέλεσμα (1Χ2)</div>', unsafe_allow_html=True)
         x1, x2, x3 = st.columns(3)
-        x1.markdown(card(f"1 · {home}", p["1"], C_HOME), unsafe_allow_html=True)
-        x2.markdown(card("Χ · Ισοπαλία", p["X"], C_DRAW), unsafe_allow_html=True)
-        x3.markdown(card(f"2 · {away}", p["2"], C_AWAY), unsafe_allow_html=True)
+        mx = max(p["1"], p["X"], p["2"])
+        x1.markdown(card(f"1 · {home}", p["1"], C_HOME, p["1"] == mx), unsafe_allow_html=True)
+        x2.markdown(card("Χ · Ισοπαλία", p["X"], C_DRAW, p["X"] == mx), unsafe_allow_html=True)
+        x3.markdown(card(f"2 · {away}", p["2"], C_AWAY, p["2"] == mx), unsafe_allow_html=True)
         opts = {"1": p["1"], "Χ": p["X"], "2": p["2"]}
         k1 = max(opts, key=opts.get)
         st.markdown(f'<div class="pick">Πιο πιθανό: <b>{k1}</b> ({opts[k1] * 100:.1f}%) · '
@@ -1433,9 +2142,10 @@ def main():
 
         st.markdown('<div class="section">🛡️ Διπλή ευκαιρία</div>', unsafe_allow_html=True)
         d1, d2, d3 = st.columns(3)
-        d1.markdown(card("1Χ", p["1X"], C_DC[0]), unsafe_allow_html=True)
-        d2.markdown(card("Χ2", p["X2"], C_DC[1]), unsafe_allow_html=True)
-        d3.markdown(card("12", p["12"], C_DC[2]), unsafe_allow_html=True)
+        mxd = max(p["1X"], p["X2"], p["12"])
+        d1.markdown(card("1Χ", p["1X"], C_DC[0], p["1X"] == mxd), unsafe_allow_html=True)
+        d2.markdown(card("Χ2", p["X2"], C_DC[1], p["X2"] == mxd), unsafe_allow_html=True)
+        d3.markdown(card("12", p["12"], C_DC[2], p["12"] == mxd), unsafe_allow_html=True)
         dc = {"1Χ": p["1X"], "Χ2": p["X2"], "12": p["12"]}
         k2 = max(dc, key=dc.get)
         st.markdown(f'<div class="pick">Ασφαλέστερη επιλογή: <b>{k2}</b> ({dc[k2] * 100:.1f}%) · '
@@ -1444,10 +2154,10 @@ def main():
         st.markdown('<div class="section">⚽ Under / Over γκολ</div>', unsafe_allow_html=True)
         cols = st.columns(4)
         for col, n in zip(cols, ("15", "25", "35", "45")):
-            col.markdown(card(LABELS["U" + n], p["U" + n], C_UNDER), unsafe_allow_html=True)
+            col.markdown(card(LABELS["U" + n], p["U" + n], C_UNDER, p["U" + n] >= 0.5), unsafe_allow_html=True)
         cols = st.columns(4)
         for col, n in zip(cols, ("15", "25", "35", "45")):
-            col.markdown(card(LABELS["O" + n], p["O" + n], C_OVER), unsafe_allow_html=True)
+            col.markdown(card(LABELS["O" + n], p["O" + n], C_OVER, p["O" + n] > 0.5), unsafe_allow_html=True)
         ku = "Under 4.5" if p["U45"] >= 0.5 else "Over 4.5"
         kp = max(p["U45"], 1 - p["U45"])
         st.markdown(f'<div class="pick">Για το 4.5: <b>{ku}</b> ({kp * 100:.1f}%) · '
@@ -1455,8 +2165,8 @@ def main():
 
         st.markdown('<div class="section">🥅 Γκολ-Γκολ (BTTS)</div>', unsafe_allow_html=True)
         g1, g2 = st.columns(2)
-        g1.markdown(card("Γκολ-Γκολ ΝΑΙ", p["GG"], C_GG), unsafe_allow_html=True)
-        g2.markdown(card("Γκολ-Γκολ ΟΧΙ", p["NG"], C_NG), unsafe_allow_html=True)
+        g1.markdown(card("Γκολ-Γκολ ΝΑΙ", p["GG"], C_GG, p["GG"] >= 0.5), unsafe_allow_html=True)
+        g2.markdown(card("Γκολ-Γκολ ΟΧΙ", p["NG"], C_NG, p["NG"] > 0.5), unsafe_allow_html=True)
 
         st.markdown('<div class="section">🔢 Τα 5 πιθανότερα σκορ</div>', unsafe_allow_html=True)
         rows = [[f"{i}-{j}", f"{pr * 100:.1f}%", f"{1 / pr:.1f}"] for pr, i, j in res["top"]]
@@ -1577,13 +2287,19 @@ def main():
         st.caption("Ταξινόμηση: βαθμοί, διαφορά γκολ, γκολ υπέρ. Με φωτισμό οι δύο ομάδες του αγώνα.")
 
     with tab6:
-        render_fixtures(dfm, fx_league, book, use_xg, half_life, w_mkt)
+        render_fixtures(dfm, fx_league, book, use_xg, half_life, w_mkt, adj_scale)
 
     with tab7:
-        render_accuracy(dfm, use_xg, half_life, code)
+        render_accuracy(dfm, use_xg, half_life, code, adj_scale)
 
     with tab8:
         render_safe_bets(home, away, lh, la, dfm, mkt)
+
+    with tab9:
+        render_tuning(leagues, prev_sets, old_w, (half_life, bool(use_xg), adj_scale))
+
+    with tab10:
+        render_xray(dfm, home, away, p, odds_in)
 
     # ------------------------------------------------------------------ ΑΠΟΘΗΚΕΥΣΗ
     st.markdown('<div class="section">💾 Αποθήκευση ανάλυσης</div>', unsafe_allow_html=True)
@@ -1618,7 +2334,8 @@ def main():
 
     st.caption(
         "Η ανάλυση βασίζεται σε στατιστικό μοντέλο (Poisson) πάνω στα γκολ"
-        + (" και τα xG" if res["used_xg"] else "")
+        + (" και τα xG" if res["used_xg"] is True else
+           (" και εκτιμώμενο xG από τα σουτ" if res["used_xg"] == "est" else ""))
         + " του αρχείου. Δείχνει πιθανότητες, όχι βέβαιο αποτέλεσμα."
     )
 
